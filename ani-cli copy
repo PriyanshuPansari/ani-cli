@@ -9,37 +9,9 @@ external_menu() {
 }
 
 launcher() {
-    if [ "$use_external_menu" = "0" ]; then
-        [ -z "$1" ] && set -- "+m" "$2"
-        
-        fzf "$1" --reverse --cycle --prompt "$2" \
-            --preview '
-                # Get the line number from selection
-                num=$(echo "{}" | cut -f1)
-                
-                # Get the full data for this entry
-                data=$(sed -n "${num}p" "$PREVIEW_DATA")
-                
-                # Extract fields
-                id=$(echo "$data" | cut -d§ -f1)
-                title=$(echo "$data" | cut -d§ -f2)
-                desc=$(echo "$data" | cut -d§ -f3)
-                genres=$(echo "$data" | cut -d§ -f4)
-                show_status=$(echo "$data" | cut -d§ -f5)
-                rating=$(echo "$data" | cut -d§ -f6)
-                
-                printf "\033[1;36mTitle:\033[0m\n%s\n\n" "$title"
-                printf "\033[1;36mDescription:\033[0m\n%s\n\n" \
-                    "$(echo "$desc" | sed "s/<br>/\n/g; s/&#x2014;/-/g; s/&apos;/''/g")"
-                printf "\033[1;36mGenres:\033[0m\n%s\n\n" \
-                    "$(echo "$genres" | tr "," "\n" | sed "s/^[[:space:]]*//; s/\"//g")"
-                printf "\033[1;36mStatus:\033[0m %s\n\n" "$show_status"
-                printf "\033[1;36mRating:\033[0m %s\n" "$rating"
-            ' \
-            --preview-window=right:50%:wrap
-    else
-        external_menu "$1" "$2"
-    fi
+    [ "$use_external_menu" = "0" ] && [ -z "$1" ] && set -- "+m" "$2"
+    [ "$use_external_menu" = "0" ] && fzf "$1" --reverse --cycle --prompt "$2"
+    [ "$use_external_menu" = "1" ] && external_menu "$1" "$2"
 }
 
 nth() {
@@ -238,52 +210,41 @@ get_episode_url() {
 
 # search the query and give results
 search_anime() {
-    # Create a temporary file for storing the full data
-    PREVIEW_DATA=$(mktemp)
-    export PREVIEW_DATA
-
-    search_gql='query(
-        $search: SearchInput
-        $limit: Int
-        $page: Int
-        $translationType: VaildTranslationTypeEnumType
-        $countryOrigin: VaildCountryOriginEnumType
+    search_gql="query(
+        \$search: SearchInput
+        \$limit: Int
+        \$page: Int
+        \$translationType: VaildTranslationTypeEnumType
+        \$countryOrigin: VaildCountryOriginEnumType
     ) {
         shows(
-            search: $search
-            limit: $limit
-            page: $page
-            translationType: $translationType
-            countryOrigin: $countryOrigin
+            search: \$search
+            limit: \$limit
+            page: \$page
+            translationType: \$translationType
+            countryOrigin: \$countryOrigin
         ) {
             edges {
-                _id 
-                name 
+                _id
+                name
+                englishName
                 availableEpisodes
-                description
-                genres
-                status
-                rating
-                __typename
             }
         }
-    }'
+    }"
 
-    # Process and store full data in temp file
-    curl -e "$allanime_refr" -s -G "${allanime_api}/api" \
+    response=$(curl -e "$allanime_refr" -s -G "${allanime_api}/api" \
         --data-urlencode "variables={\"search\":{\"allowAdult\":false,\"allowUnknown\":false,\"query\":\"$1\"},\"limit\":40,\"page\":1,\"translationType\":\"$mode\",\"countryOrigin\":\"ALL\"}" \
-        --data-urlencode "query=$search_gql" -A "$agent" | \
-    sed 's|Show|\n|g' | \
-    sed -nE '
-        /"_id":/!d;
-        s/.*"_id":"([^"]*)".*"name":"([^"]*)".*"description":"([^"]*)".*"genres":\[([^]]*)\].*"status":"([^"]*)".*"rating":"([^"]*)".*/\1§\2§\3§\4§\5§\6/p
-    ' > "$PREVIEW_DATA"
+        --data-urlencode "query=$search_gql" \
+        -A "$agent")
 
-    # Output just the numbered list for fzf
-    n=0
-    while IFS='§' read -r id name desc genres status rating; do
-        printf "%d\t%s (%s episodes)\n" "$((n+=1))" "$name" "$mode"
-    done < "$PREVIEW_DATA"
+    printf "%s" "$response" | \
+        jq -r '.data.shows.edges[] | [._id, .name, .englishName, .availableEpisodes.sub] | @tsv' 2>/dev/null | \
+        while IFS=$'\t' read -r id name eng_name episodes; do
+            [ "$eng_name" = "null" ] && eng_name=""
+            [ -n "$eng_name" ] && eng_name=" ($eng_name)"
+            printf "%s\t%s%s - %s episodes\n" "$id" "$name" "$eng_name" "$episodes"
+        done
 }
 
 time_until_next_ep() {
@@ -589,9 +550,6 @@ while cmd=$(printf "next\nreplay\nprevious\nselect\nchange_quality\nquit" | nth 
     [ -z "$ep_no" ] && die "Out of range"
     play
 done
-
-# Clean up temp file when script exits
-trap 'rm -f "$PREVIEW_DATA"' EXIT
 
 # ani-cli
 #
